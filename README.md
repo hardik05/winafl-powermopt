@@ -1,10 +1,10 @@
-# WinAFL
+# WinAFL PowerMopt
 
 ```
    Original AFL code written by Michal Zalewski <lcamtuf@google.com>
 
    Windows fork written and maintained by Ivan Fratric <ifratric@google.com>
-
+   
    Copyright 2016 Google Inc. All Rights Reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
