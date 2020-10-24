@@ -160,10 +160,9 @@ The following afl-fuzz options are supported:
   -F            - power scheuler(this is from AFLFast) - fast (default), coe, explore, lin, quad, or exploit
   -L            - This is from mOpt-AFL, time to enter pacemaker fuzzing mode. 
 ```
-## F and L optins are for powerscheule and mopt mutators respectivly. 
+## F and L options are for powerscheule and mopt mutators respectivly. 
 ## MOpt mutators from: https://github.com/puppet-meteor/MOpt-AFL
 ## AFLFast powerschedulers from: https://github.com/mboehme/aflfast
-## MOpt+AFL PowerScheduler winafl port by hardik05@gmail.com
 ##
 
 Please refer to the original AFL documentation for more info on these flags.
