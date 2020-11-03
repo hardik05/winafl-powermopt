@@ -4,6 +4,9 @@
    Original AFL code written by Michal Zalewski <lcamtuf@google.com>
 
    Windows fork written and maintained by Ivan Fratric <ifratric@google.com>
+   Mopt mutators from: https://github.com/puppet-meteor/MOpt-AFL, based on the work of Chenyang Lyu, Shouling Ji, Chao Zhang, Yuwei Li, Wei-Han Lee, Yu Song and Raheem Beyah
+   AFL Fast power schedulers from: https://github.com/mboehme/aflfast, based on the work of mboehme
+   Ported to winafl by hardik shah, hardik05@gmail.com
    
    Copyright 2016 Google Inc. All Rights Reserved.
 
