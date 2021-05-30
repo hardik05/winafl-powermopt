@@ -6,7 +6,7 @@
    Windows fork written and maintained by Ivan Fratric <ifratric@google.com>
    Mopt mutators from: https://github.com/puppet-meteor/MOpt-AFL, based on the work of Chenyang Lyu, Shouling Ji, Chao Zhang, Yuwei Li, Wei-Han Lee, Yu Song and Raheem Beyah
    AFL Fast power schedulers from: https://github.com/mboehme/aflfast, based on the work of mboehme
-   Ported to winafl by hardik shah, hardik05@gmail.com
+   Ported to winafl by hardik shah, hardik05@gmail.com, https://twitter.com/hardik05
    
    Copyright 2016 Google Inc. All Rights Reserved.
 
@@ -22,6 +22,8 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
+## Why another fork?
+On windows we are limited in fuzzing capabilities, while there are lot of mods to original AFL, winafl is way behing in terms of latest AFL development. So i decided to use AFLFast power schedulers and AFL Mopt mutators to winafl. this is my mod to winafl. note that these uses powerschedulers and mopt mutators from their original AFL releases and thus may not be up to date. if you can update this with the latest version then PR are welcome!
 
 ## Background
 
