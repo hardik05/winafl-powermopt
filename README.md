@@ -1,6 +1,6 @@
 # WinAFL PowerMopt
 
-WinAFL with mopt mutators and power schedulers.
+WinAFL with mopt mutators and AFLFast power schedulers.
 
 ```
    Original AFL code written by Michal Zalewski <lcamtuf@google.com>
