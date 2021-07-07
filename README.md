@@ -27,7 +27,7 @@ WinAFL with mopt mutators and AFLFast power schedulers.
    limitations under the License.
 ```
 ## Why another fork?
-On windows we are limited in fuzzing capabilities, while there are lot of mods to original AFL, winafl is way behing in terms of latest AFL development. So i decided to use AFLFast power schedulers and AFL Mopt mutators to winafl. this is my mod to winafl. note that these uses powerschedulers and mopt mutators from their original AFL releases and thus may not be up to date. if you can update this with the latest version then PR are welcome!
+On windows we are limited in fuzzing capabilities, while there are lot of mods to original AFL, winafl is way behind in terms of latest AFL development. So I decided to use AFLFast power schedulers and AFL Mopt mutators to winafl. This is my mod to winafl. Note that these uses powerschedulers and mopt mutators from their original AFL releases and thus may not be up to date. if you can update this with the latest version then PR are most welcome!
 
 ## Background
 
