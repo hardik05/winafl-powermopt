@@ -417,7 +417,7 @@ int select_algorithm(int extras) {
   //SAYF("select : %f\n",sele);
   j_puppet = 0;
   int operator_number = operator_num;
-  if (extras == 0) operator_number = operator_number - 2;
+  if (extras < 2) operator_number = operator_number - 2;
   double range_sele = (double)probability_now[swarm_now][operator_number - 1];
   double sele = ((double)(rand() % 10000) * 0.0001 * range_sele);
 
@@ -8751,7 +8751,7 @@ static u8 pilot_fuzzing(char** argv) {
                                                        memcpy(out_buf + insert_at, extras[use_extra].data, extra_len);
 
                                                        }
-                                                       stage_cycles_puppet_v2[swarm_now][STAGE_OverWriteExtra] += 1;
+                                                       core_operator_cycles_puppet_v2[STAGE_OverWriteExtra] += 1;
 
                                                        break;
 
@@ -8804,7 +8804,7 @@ static u8 pilot_fuzzing(char** argv) {
                                                        ck_free(out_buf);
                                                        out_buf   = new_buf;
                                                        temp_len += extra_len;
-                                                       stage_cycles_puppet_v2[swarm_now][STAGE_InsertExtra] += 1;
+                                                       core_operator_cycles_puppet_v2[STAGE_InsertExtra] += 1;
                                                        break;
 
                                                  }
