@@ -21,7 +21,7 @@ jobs:
         mv DynamoRIO-Windows-* DynamoRio-Windows
     - name: Run cmake
       working-directory: build_${{ matrix.platform }}
-      run: cmake -G"Visual Studio 16 2019" -A ${{ matrix.platform }} -DDynamoRIO_DIR="build_${{ matrix.platform }}\DynamoRIO-Windows\cmake" -DINTELPT=1 ..
+      run: cmake -G"Visual Studio 16 2019" -A ${{ matrix.platform }} -DDynamoRIO_DIR="build_${{ matrix.platform }}\DynamoRIO-Windows\cmake" -DINTELPT=0 ..
     - name: Build
       run: cmake --build build_${{ matrix.platform }} --config Release
     - name: Add Python scripts to build artifacts dir
