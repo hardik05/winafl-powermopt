@@ -555,7 +555,19 @@ static void
 post_fuzz_handler(void *wrapcxt, void *user_data)
 {
     dr_mcontext_t *mc;
+    void *drcontext;
     mc = drwrap_get_mcontext(wrapcxt);
+
+    if(options.no_loop && (options.coverage_kind == COVERAGE_EDGE || options.thread_coverage)) {
+        // no_loo and thread_coverage are enabled.
+        // It is possible that the thread will return to a thread queue
+        // in which case it can later call other functions than the target.
+        // Therefore, coverage measurement must be stopped for this thread.
+        drcontext = drwrap_get_drcontext(wrapcxt);
+        void **thread_data = (void **)drmgr_get_tls_field(drcontext, winafl_tls_field);
+        thread_data[1] = winafl_data.fake_afl_area;
+    }
+
 
     if(!options.debug_mode) {
 		WriteCommandToPipe('K');
@@ -685,7 +697,7 @@ event_module_load(void *drcontext, const module_data_t *info, bool loaded)
                     drsym_lookup_symbol(info->full_path, options.fuzz_method, (size_t *)(&to_wrap), 0);
                     drsym_exit();
 #endif
-                    DR_ASSERT_MSG(to_wrap, "Can't find specified method in fuzz_module");                
+                    DR_ASSERT_MSG(to_wrap, "Can't find specified method in target_module");
                     to_wrap += (size_t)info->start;
                 }
             }
@@ -959,7 +971,7 @@ options_init(client_id_t id, int argc, const char *argv[])
     }
 
     if(options.fuzz_module[0] && (options.fuzz_offset == 0) && (options.fuzz_method[0] == 0)) {
-       USAGE_CHECK(false, "If fuzz_module is specified, then either fuzz_method or fuzz_offset must be as well");
+       USAGE_CHECK(false, "If target_module is specified, then either target_method or target_offset must be as well");
     }
 
     if(options.num_fuz_args) {

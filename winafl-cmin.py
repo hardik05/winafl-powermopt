@@ -15,6 +15,8 @@
 #      http://www.apache.org/licenses/LICENSE-2.0
 #
 #
+from __future__ import print_function
+
 import argparse
 import collections
 import logging
@@ -143,16 +145,18 @@ def target_offset(opt):
     raises an ArgumentTypeError exception back to the argparse parser.'''
     try:
         return int(opt, 0)
-    except:
+    except ValueError:
         raise argparse.ArgumentTypeError('must be an integer')
+
 
 def memory_limit(opt):
     '''Validates that the -m parameter is properly formated, else
     raises an ArgumentTypeError exception back to the argparse parser.'''
-    if re.match('^\d+[TGkM]{0,1}$', opt) or opt == 'none':
+    if re.match(r'^\d+[TGkM]?$', opt) or opt == 'none':
         return opt
     raise argparse.ArgumentTypeError('must be an integer followed by either: '
                                      'T, G, M, k or nothing; or none')
+
 
 def setup_argparse():
     '''Sets up the argparse configuration.'''
@@ -188,6 +192,14 @@ def setup_argparse():
     group.add_argument(
         '-o', '--output', required = True,
         metavar = 'dir', help = 'output directory for minimized files'
+    )
+    group.add_argument(
+        '--crash-dir', required=False,
+        metavar='dir', help='output directory for crashing files'
+    )
+    group.add_argument(
+        '--hang-dir', required=False,
+        metavar='dir', help='output directory for hanging files'
     )
     group.add_argument(
         '-n', '--dry-run', action = 'store_true', default = False,
@@ -272,7 +284,7 @@ def setup_argparse():
     group = parser.add_argument_group('minimization settings')
     group.add_argument(
         '-C', '--crash-only', action = 'store_true', default = False,
-        help = 'keep crashing inputs, reject everything else'
+        help = 'keep crashing inputs in output directory, reject everything else'
     )
     group.add_argument(
         '-e', '--edges-only', action = 'store_true', default = False,
@@ -292,126 +304,137 @@ def setup_argparse():
     )
     return parser.parse_args()
 
-def do_unique_copy(filepath, dest_path):
-    filename = os.path.basename(filepath)
-    new_dest = os.path.join(dest_path, filename)
-    
-    id = 0
-    # Avoid duplicated filename in the destination folder
-    while os.path.exists(new_dest):
-        new_dest = os.path.join(dest_path, filename+"_"+str(id))
-        id += 1
-        
-    # Now we can copy the file to destination
-    shutil.copy(filepath, new_dest)
-    
-def main(argc, argv):
-    print 'corpus minimization tool for WinAFL by <0vercl0k@tuxfamily.org>'
-    print 'Based on WinAFL by <ifratric@google.com>'
-    print 'Based on AFL by <lcamtuf@google.com>'
 
-    logging.basicConfig(
-        filename = 'winafl-cmin.log',
-        level = logging.DEBUG,
-        format = '%(asctime)s [%(levelname)-5.5s] [%(funcName)s] %(message)s'
-    )
-
-    args = setup_argparse()
-    cli_handler = logging.StreamHandler(sys.stdout)
-    cli_handler.setLevel(args.verbose)
-    logging.getLogger().addHandler(cli_handler)
-
-    # Interestingly enough, if the user uses '.. -- target.exe -option foo ..'
-    # argparse will add '--' in the target_cmdline option, so we need to
-    # strip it off manually here.
-    if args.target_cmdline[0] == '--':
-        del args.target_cmdline[0]
+def validate_args(args):
+    '''Validate command-line arguments'''
+    # Validate that the first argument is an executable
+    if not os.path.isfile(args.target_cmdline[0]):
+        logging.error(
+            '[!] The target command line\'s first argument needs to'
+            ' be an existing executable file.'
+        )
+        return False
 
     # If we are not seeing the '@@' marker somewhere and that we are not
     # specifying an input file with -f, then it means something is wrong
     if args.file_read is None and '@@' not in args.target_cmdline:
         logging.error(
-            '[!] The target command line needs to include the "@@" marker to'
-            ' specify the input file.'
+            '[!] The target command line needs to include the "@@" marker'
+            ' or -f to specify the input file.'
         )
-        return 1
+        return False
 
     # Another sanity check on the root of output directory
     if os.path.isdir(os.path.split(args.output)[0]) is False:
         logging.error(
             '[!] The output directory %r is not a directory', args.output
         )
-        return 1
+        return False
         
+    # Another sanity check on the root of crash directory
+    if args.crash_dir and os.path.isdir(os.path.split(args.crash_dir)[0]) is False:
+        logging.error(
+            '[!] The output crash directory %r is not a directory', args.crash_dir
+        )
+        return False
+
+    # Another sanity check on the root of hang directory
+    if args.hang_dir and os.path.isdir(os.path.split(args.hang_dir)[0]) is False:
+        logging.error(
+            '[!] The output hangs directory %r is not a directory', args.hang_dir
+        )
+        return False
+
     if os.path.isdir(args.working_dir) is False:
         logging.error(
             '[!] The working directory %r is not a directory', args.working_dir
         )
-        return 1
+        return False
 
-    os.chdir(args.working_dir)
-    logging.info('[+] CWD changed to %s.', args.working_dir)
-    if args.static_instr is True:
-        logging.info('[+] Dynamorio-less mode is enabled.')
+    # Regardless of DRIO being used or not, we need afl-showmap.exe
+    afl_showmap_path = os.path.join(args.working_dir, 'afl-showmap.exe')
+    if not os.path.isfile(afl_showmap_path):
+        logging.error('[!] afl-showmap.exe need to be in %s.', args.working_dir)
+        return False
+
+    # Make sure the output directory doesn't exist yet
+    if os.path.isabs(args.output):
+        output_dir_path = args.output
     else:
+        output_dir_path = os.path.join(args.working_dir, args.output)
+    if args.dry_run is False and os.path.isdir(output_dir_path):
+        logging.error(
+            '[!] %s already exists, please remove it to avoid data loss.',
+            args.output
+        )
+        return False
+
+    if not args.static_instr:
         # Make sure we have all the arguments we need
         if len(args.coverage_modules) == 0:
             logging.error(
                 '[!] -coverage_module is a required option to use'
                 'the dynamic instrumentation'
             )
-            return 1
+            return False
 
         if None in [args.target_module, args.nargs]:
             logging.error(
                 '[!] , -target_module and -nargs are required'
                 ' options to use the dynamic instrumentation mode.'
             )
-            return 1
+            return False
 
         if args.target_method is None and args.target_offset is None:
             logging.error(
                 '[!] -target_method or -target_offset is required to use the'
                 ' dynamic instrumentation mode'
             )
-            return 1
+            return False
 
         # If we are using DRIO, one of the thing we need is the DRIO client
-        if os.path.isfile('winafl.dll') is False:
+        winafl_path = os.path.join(args.working_dir, 'winafl.dll')
+        if not os.path.isfile(winafl_path):
             logging.error(
                 '[!] winafl.dll needs to be in %s.', args.working_dir
             )
-            return 1
+            return False
 
-    # Regardless of DRIO being used or not, we need afl-showmap.exe
-    if os.path.isfile('afl-showmap.exe') is False:
-        logging.error('[!] afl-showmap.exe need to be in %s.', args.working_dir)
-        return 1
+    if args.file_read is not None and '@@' not in args.file_read:
+        # When a particular input file is specified, first
+        # check if the file already exists, because we don't want to overwrite
+        # a potentially interesting test case.
+        if os.path.isabs(args.file_read):
+            file_read_path = args.file_read
+        else:
+            file_read_path = os.path.join(args.working_dir, args.file_read)
+        if os.path.isfile(file_read_path):
+            logging.error(
+                '[!] %s already exists, please remove it to avoid data loss.',
+                args.file_read
+            )
+            return False
 
-    # Make sure the output directory doesn't exist yet
-    if args.dry_run is False and os.path.isdir(args.output):
-        logging.error(
-            '[!] %s already exists, please remove it to avoid data loss.',
-            args.output
-        )
-        return 1
+    for i in args.input:
+        if os.path.isabs(i):
+            dir_path = i
+        else:
+            dir_path = os.path.join(args.working_dir, i)
 
-    # Go get all the input files we want to have a look at
-    assert all(os.path.isdir(i) for i in args.input)
-    logging.debug(
-        'Inspecting the following directories: %s',
-        ', '.join(args.input)
-    )
-    inputs = []
-    for path in args.input:
-        for root, dirs, files in os.walk(path):
-            for file_ in files:
-                inputs.append(os.path.join(root, file_))
+        if not os.path.isdir(dir_path):
+            logging.error(
+                '[!] Specified input directory "%s" does not exist',
+                i
+            )
+            return False
 
-    # Do a dry run with the first file in the set
+    return True
+
+
+def target_dry_run(args, test_input):
     logging.info('[*] Testing the target binary...')
     f = AFLShowMapWorker(args)
-    results = map(f, (inputs[0], inputs[0]))
+    results = list(map(f, (test_input, test_input)))
     if results[0] != results[1]:
         logging.error('[!] Dry-run failed, 2 executions resulted differently:')
         logging.error(
@@ -424,21 +447,15 @@ def main(argc, argv):
         )
 
         if not args.skip_dry_run:
-            return 1
+            return False
 
     logging.info('[+] OK, %d tuples recorded.', len(results[0].tuples))
+    return True
 
+
+def run_all_inputs(args, inputs):
     nprocesses = args.workers
     if args.file_read is not None and '@@' not in args.file_read:
-        # Check if the file already exists, we don't want to overwrite a
-        # potential interesting test case.
-        if os.path.isfile(args.file_read):
-            logging.error(
-                '[!] %s already exists, please remove it to avoid data loss.',
-                args.file_read
-            )
-            return 1
-
         # If you are providing -f, but doesn't specify '@@' in the command line
         # of the target, it might be a sign that you are doing something wrong.
         if '@@' not in args.target_cmdline:
@@ -464,7 +481,6 @@ def main(argc, argv):
         inputs_len, ', '.join(args.input)
     )
 
-    t0 = time.time()
     logging.info('[*] Instantiating %d worker processes.', nprocesses)
     p = multiprocessing.Pool(processes = nprocesses)
     # This tracks every unique tuples and their popularities
@@ -493,7 +509,7 @@ def main(argc, argv):
         AFLShowMapWorker(args),
         inputs
     ):
-        print '\rProcessing file %d/%d...' % (i, inputs_len),
+        print('\rProcessing file %d/%d...' % (i, inputs_len), end=' ')
         i += 1
         # If the set of tuples is empty, something weird happened
         if len(result.tuples) == 0:
@@ -538,7 +554,7 @@ def main(argc, argv):
 
         # Keep an updated dictionary mapping a tuple to the fittest file
         # of all the paths.
-        for tuple_id, tuple_hitcount in result.tuples.iteritems():
+        for tuple_id, tuple_hitcount in result.tuples.items():
             fileinfo = {
                 'size' : result.filesize,
                 'path' : result.path,
@@ -564,19 +580,19 @@ def main(argc, argv):
                             candidate[tuple_id] = fileinfo
             else:
                 candidates[tuple_id] = fileinfo
+    p.close()
 
     len_crash_files, len_hang_files, len_empty_tuple_files = map(
         len, (crash_files, hang_files, empty_tuple_files)
     )
-    effective_len = inputs_len - (
+    effective_len = len(inputs) - (
         len_crash_files + len_hang_files + len_empty_tuple_files
     )
-    print
+    print()
 
-    len_uniq_tuples = len(uniq_tuples)
     logging.info(
         '[+] Found %d unique tuples across %d files',
-        len_uniq_tuples, effective_len
+        len(uniq_tuples), effective_len
     )
     if len_hang_files > 0:
         logging.info('  - %d files triggered a hang', len_hang_files)
@@ -600,8 +616,10 @@ def main(argc, argv):
         for empty_tuple_file in empty_tuple_files:
             logging.debug('    - %s generated an empty tuple', empty_tuple_file)
 
-    logging.info('[*] Finding best candidates for each tuple...')
+    return uniq_tuples, candidates, effective_len, totalsize, crash_files, hang_files
 
+
+def find_best_candidates(uniq_tuples, candidates):
     # Using the same strategy than in afl-cmin, quoting lcamtuf:
     # '''
     # The "best" part is understood simply as the smallest input that
@@ -612,6 +630,7 @@ def main(argc, argv):
     minset = []
     minsetsize = 0
     remaining_tuples = list(uniq_tuples)
+    len_uniq_tuples = len(uniq_tuples)
     for tuple_ in uniq_tuples:
         if tuple_ not in remaining_tuples:
             # It means we already deleted this tuple, as it was exercised
@@ -623,7 +642,7 @@ def main(argc, argv):
 
         # Remove the other tuples also exercised by the candidate
         # from the remaining_tuples list.
-        for tuple_exercised in candidate['tuples'].iterkeys():
+        for tuple_exercised in candidate['tuples']:
             # Remove the tuples exercised if we have not
             # removed them already from the
             # remaining_tuples list.
@@ -637,17 +656,90 @@ def main(argc, argv):
         # We are now done with this tuple, we can get rid of it.
         del candidates[tuple_]
 
-        print '\rProcessing tuple %d/%d...' % (
+        print('\rProcessing tuple %d/%d...' % (
             len_uniq_tuples - len(remaining_tuples),
             len_uniq_tuples
-        ),
+        ), end=' ')
 
         # If we don't have any more tuples left, we are done.
         if len(remaining_tuples) == 0:
             break
 
-    print
-    logging.info('[+] Original set was composed of %d files', inputs_len)
+    return minset, minsetsize
+
+
+def do_unique_copy(filepaths, dest_dir):
+    os.mkdir(dest_dir)
+    num_digits = len(str(len(filepaths)-1))
+    for i, fpath in enumerate(filepaths):
+        filename = os.path.basename(fpath)
+        dest_path = os.path.join(dest_dir, 'id_' + str(i).zfill(num_digits) + "_" + filename)
+        shutil.copy(fpath, dest_path)
+
+
+def main(argc, argv):
+    print('corpus minimization tool for WinAFL by <0vercl0k@tuxfamily.org>')
+    print('Based on WinAFL by <ifratric@google.com>')
+    print('Based on AFL by <lcamtuf@google.com>')
+
+    logging.basicConfig(
+        filename = 'winafl-cmin.log',
+        level = logging.DEBUG,
+        format = '%(asctime)s [%(levelname)-5.5s] [%(funcName)s] %(message)s'
+    )
+
+    args = setup_argparse()
+    cli_handler = logging.StreamHandler(sys.stdout)
+    cli_handler.setLevel(args.verbose)
+    logging.getLogger().addHandler(cli_handler)
+
+    # Interestingly enough, if the user uses '.. -- target.exe -option foo ..'
+    # argparse will add '--' in the target_cmdline option, so we need to
+    # strip it off manually here.
+    if args.target_cmdline[0] == '--':
+        del args.target_cmdline[0]
+
+    logging.debug(
+                    '[+] winafl-cmin launched with the following arguments: %s',
+                    ' '.join(sys.argv)
+                )
+
+    if not validate_args(args):
+        return 1
+
+    os.chdir(args.working_dir)
+    logging.info('[+] CWD changed to %s.', args.working_dir)
+    if args.static_instr is True:
+        logging.info('[+] Dynamorio-less mode is enabled.')
+
+    # Go get all the input files we want to have a look at
+    logging.debug(
+        'Inspecting the following directories: %s',
+        ', '.join(args.input)
+    )
+    inputs = []
+    for path in args.input:
+        for root, dirs, files in os.walk(path):
+            for file_ in files:
+                inputs.append(os.path.join(root, file_))
+
+    if not inputs:
+        logging.error('  Input directories do not contain any files!')
+        return 1
+
+    # Do a dry run with the first file in the set
+    if not target_dry_run(args, inputs[0]):
+        return 1
+
+    t0 = time.time()
+    uniq_tuples, candidates, effective_len, totalsize, crash_files, hang_files = run_all_inputs(args, inputs)
+
+    logging.info('[*] Finding best candidates for each tuple...')
+
+    minset, minsetsize = find_best_candidates(uniq_tuples, candidates)
+
+    print()
+    logging.info('[+] Original set was composed of %d files', len(inputs))
     logging.info(
         '[+] Effective set was composed of %d files (total size %d MB).',
         effective_len, (totalsize / 1024) / 1024
@@ -661,12 +753,25 @@ def main(argc, argv):
         logging.info(
             '[*] Saving the minset in %s...', os.path.abspath(args.output)
         )
-        os.mkdir(args.output)
-        for file_path in minset:
-            do_unique_copy(file_path, args.output)
+        do_unique_copy(minset, args.output)
+
+        if args.crash_dir and crash_files:
+            logging.info(
+                '[+] Saving %d crashing files to %s',
+                len(crash_files), args.crash_dir
+            )
+            do_unique_copy(crash_files, args.crash_dir)
+
+        if args.hang_dir and hang_files:
+            logging.info(
+                '[+] Saving %d hanging files to %s',
+                len(hang_files), args.hang_dir
+            )
+            do_unique_copy(hang_files, args.hang_dir)
 
     logging.info('[+] Time elapsed: %d seconds', time.time() - t0)
     return 0
+
 
 if __name__ == '__main__':
     sys.exit(main(len(sys.argv), sys.argv))
