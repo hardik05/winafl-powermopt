@@ -109,7 +109,7 @@ source directory).
 ```
 mkdir build32
 cd build32
-cmake -G"Visual Studio 15 2017" .. -DDynamoRIO_DIR=..\path\to\DynamoRIO\cmake -DINTELPT=1
+cmake -G"Visual Studio 16 2019" .. -DDynamoRIO_DIR=..\path\to\DynamoRIO\cmake -DINTELPT=1
 cmake --build . --config Release
 ```
 
@@ -118,7 +118,7 @@ cmake --build . --config Release
 ```
 mkdir build64
 cd build64
-cmake -G"Visual Studio 15 2017 Win64" .. -DDynamoRIO_DIR=..\path\to\DynamoRIO\cmake -DINTELPT=1
+cmake -G"Visual Studio 16 2019" -A x64 .. -DDynamoRIO_DIR=..\path\to\DynamoRIO\cmake -DINTELPT=1
 cmake --build . --config Release
 ```
 
@@ -160,13 +160,23 @@ The following afl-fuzz options are supported:
   -o dir        - output directory for fuzzer findings
   -D dir        - directory containing DynamoRIO binaries (drrun, drconfig)
   -p            - persist DynamoRIO cache across target process restarts
+  -w winafl     - Path to winafl.dll
+  -P            - use Intel PT tracing mode
+  -Y            - enable the static instrumentation mode
+  -f file       - location read by the fuzzed program (stdin)
+  -c cpu        - the CPU to run the fuzzed program
+  -d            - quick & dirty mode (skips deterministic steps)
+  -n            - fuzz without instrumentation (dumb mode)
+  -T text       - text banner to show on the screen
+  -C            - crash exploration mode (the peruvian rabbit thing)
+  -l path       - a path to user-defined DLL for custom test cases processing
   -t msec       - timeout for each run
   -I msec       - timeout for process initialization and first run
   -f file       - location read by the fuzzed program
   -M \\ -S id   - distributed mode
   -x dir        - optional fuzzer dictionary
   -m limit      - memory limit for the target process
-  -F            - power scheuler(this is from AFLFast) - fast (default), coe, explore, lin, quad, or exploit
+  -F schedule   - power scheuler(this is from AFLFast) - fast (default), coe, explore, lin, quad, or exploit
   -L            - This is from mOpt-AFL, time to enter pacemaker fuzzing mode. 
 ```
 ## F and L options are for powerscheule and mopt mutators respectivly. 
