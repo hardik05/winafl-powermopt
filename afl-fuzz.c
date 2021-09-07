@@ -5,9 +5,9 @@
    Original AFL code written by Michal Zalewski <lcamtuf@google.com>
 
    Windows fork written and maintained by Ivan Fratric <ifratric@google.com>
-Mopt mutators from: https://github.com/puppet-meteor/MOpt-AFL, based on the work of Chenyang Lyu, Shouling Ji, Chao Zhang, Yuwei Li, Wei-Han Lee, Yu Song and Raheem Beyah
-AFL Fast power schedulers from: https://github.com/mboehme/aflfast, based on the work of mboehme
-ported to winafl by hardik shah, hardik05@gmail.com
+   Mopt mutators from: https://github.com/puppet-meteor/MOpt-AFL, based on the work of Chenyang Lyu, Shouling Ji, Chao Zhang, Yuwei Li, Wei-Han Lee, Yu Song and Raheem Beyah
+   AFL Fast power schedulers from: https://github.com/mboehme/aflfast, based on the work of mboehme
+   ported to winafl by hardik shah, hardik05@gmail.com
    Copyright 2016 Google Inc. All Rights Reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,6 +34,8 @@ ported to winafl by hardik shah, hardik05@gmail.com
 #define WIN32_LEAN_AND_MEAN /* prevent winsock.h to be included in windows.h */
 
 #define _CRT_RAND_S
+#define MAX_SAMPLE_SIZE 1000000
+
 #include <windows.h>
 #include <TlHelp32.h>
 #include <stdarg.h>
@@ -67,6 +69,7 @@ ported to winafl by hardik shah, hardik05@gmail.com
 
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
+BOOL use_sample_shared_memory = FALSE;
 static u64 limit_time_puppet = 0;
 u64 orig_hit_cnt_puppet = 0;
 u64 last_limit_time_start = 0;
@@ -184,11 +187,11 @@ static u8  skip_deterministic,        /* Skip deterministic stages?       */
            skip_requested,            /* Skip request, via SIGUSR1        */
            run_over10m,               /* Run time over 10 minutes?        */
            persistent_mode,           /* Running in persistent mode?      */
-	       drioless = 0;              /* Running without DRIO?            */
+	         drioless = 0;              /* Running without DRIO?            */
            use_intelpt = 0;           /* Running without DRIO?            */
            custom_dll_defined = 0;    /* Custom DLL path defined ?        */
-           persist_dr_cache = 0;      /* Custom DLL path defined ?		*/
-           fast_cal;                  /* Try to calibrate faster?        */
+           persist_dr_cache = 0;      /* Custom DLL path defined ?        */
+           fast_cal;                  /* Try to calibrate faster?         */
 
 static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
@@ -202,6 +205,7 @@ static s32 out_fd,                    /* Persistent fd for out_file       */
 HANDLE child_handle, child_thread_handle;
 char *dynamorio_dir;
 char *client_params;
+char *winafl_dll_path;
 int fuzz_iterations_max = 5000, fuzz_iterations_current;
 DWORD ret_exception_code = 0;
 
@@ -218,6 +222,10 @@ static u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
 static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
 static HANDLE shm_handle;             /* Handle of the SHM region         */
+
+static HANDLE sample_shm_handle;         /* Handle of the use SHM region         */
+char* sample_shm_str;
+
 static HANDLE pipe_handle;            /* Handle of the name pipe          */
 static OVERLAPPED pipe_overlapped;    /* Overlapped structure of pipe     */
 
@@ -225,6 +233,7 @@ static char   *fuzzer_id = NULL;      /* The fuzzer ID or a randomized
                                          seed allowing multiple instances */
 static HANDLE devnul_handle;          /* Handle of the nul device         */
 u8     sinkhole_stds = 1;             /* Sink-hole stdout/stderr messages?*/
+u8* shm_sample;
 
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
@@ -417,7 +426,7 @@ int select_algorithm(int extras) {
   //SAYF("select : %f\n",sele);
   j_puppet = 0;
   int operator_number = operator_num;
-  if (extras == 0) operator_number = operator_number - 2;
+  if (extras < 2) operator_number = operator_number - 2;
   double range_sele = (double)probability_now[swarm_now][operator_number - 1];
   double sele = ((double)(rand() % 10000) * 0.0001 * range_sele);
 
@@ -572,20 +581,20 @@ static void bind_to_free_cpu(void) {
 
   if (cpu_core_count < 2) return;
 
-  /* Currently winafl doesn't support more than 64 cores */
-  if (cpu_core_count > 64) {
-    SAYF("\n" cLRD "[-] " cRST
-    "Uh-oh, looks like you have %u CPU cores on your system\n"
-    "    winafl doesn't support more than 64 cores at the momement\n"
-    "    you can set AFL_NO_AFFINITY and try again.\n",
-    cpu_core_count);
-    FATAL("Too many cpus for automatic binding");
-  }
-
   if (getenv("AFL_NO_AFFINITY")) {
 
     WARNF("Not binding to a CPU core (AFL_NO_AFFINITY set).");
     return;
+  }
+
+  /* Currently winafl doesn't support more than 64 cores */
+  if (cpu_core_count > 64) {
+    SAYF("\n" cLRD "[-] " cRST
+    "Uh-oh, looks like you have %u CPU cores on your system\n"
+    "    winafl doesn't support more than 64 cores at the moment\n"
+    "    you can set AFL_NO_AFFINITY and try again.\n",
+    cpu_core_count);
+    FATAL("Too many cpus for automatic binding");
   }
 
   if (!cpu_aff) {
@@ -931,6 +940,8 @@ static void mark_as_redundant(struct queue_entry* q, u8 state) {
 
 static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
+  cycles_wo_finds = 0;
+
   struct queue_entry* q = ck_alloc(sizeof(struct queue_entry));
 
   q->fname        = fname;
@@ -950,8 +961,6 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   queued_paths++;
   pending_not_fuzzed++;
-
-  cycles_wo_finds = 0;
 
   if (!(queued_paths % 100)) {
 
@@ -1369,6 +1378,11 @@ static void remove_shm(void) {
      UnmapViewOfFile(trace_bits);
      CloseHandle(shm_handle);
 	
+  	 if (use_sample_shared_memory) {
+	    UnmapViewOfFile(shm_sample);	
+	    CloseHandle(sample_shm_handle);
+	  }
+
 }
 
 
@@ -1414,15 +1428,16 @@ static void update_bitmap_score(struct queue_entry* q) {
     if (trace_bits[i]) {
 
        if (top_rated[i]) {
-
+        
+         /* Faster-executing or smaller test cases are favored. */
          u64 top_rated_fuzz_p2    = next_p2 (top_rated[i]->n_fuzz);
          u64 top_rated_fav_factor = top_rated[i]->exec_us * top_rated[i]->len;
 
          if (fuzz_p2 > top_rated_fuzz_p2) continue;
          else if (fuzz_p2 == top_rated_fuzz_p2) {
 
-           if (fav_factor > top_rated_fav_factor) continue;
-
+          if (fav_factor > top_rated_fav_factor) continue;
+         
          }
 
          /* Looks like we're going to win. Decrease ref count for the
@@ -1510,6 +1525,44 @@ static void cull_queue(void) {
 
 }
 
+
+static void setup_sample_shm() {
+	 unsigned int seeds[2];
+	 u64 name_seed;
+	 if (fuzzer_id == NULL) {
+	   // If it is null, it means we have to generate a random seed to name the instance
+		 rand_s(&seeds[0]);
+		 rand_s(&seeds[1]);
+		 name_seed = ((u64)seeds[0] << 32) | seeds[1];
+		 fuzzer_id = (char*)alloc_printf("%I64x", name_seed);
+	 }
+	
+  sample_shm_str = (char*)alloc_printf("sample_afl_shm_%s", fuzzer_id);
+	//SAYF("sample_shm_str:\r\n", sample_shm_str);	
+
+	sample_shm_handle = CreateFileMapping(
+			INVALID_HANDLE_VALUE,    // use paging file
+			NULL,                    // default security
+			PAGE_READWRITE,          // read/write access
+			0,                       // maximum object size (high-order DWORD)
+			MAX_SAMPLE_SIZE + sizeof(uint32_t),                // maximum object size (low-order DWORD)
+		  sample_shm_str);        // name of mapping object
+		
+	if (sample_shm_handle == NULL) {
+		FATAL("CreateFileMapping failed doe shm sample, %x", GetLastError());
+	}
+
+	shm_sample = (u8*)MapViewOfFile(
+			sample_shm_handle,          // handle to map object
+			FILE_MAP_ALL_ACCESS, // read/write permission
+			0,
+			0,
+			MAX_SAMPLE_SIZE + sizeof(uint32_t)
+		);
+	//ck_free(use_shm_str);
+	if (!shm_sample) PFATAL("shmat() for sample failed");	
+
+}
 
 /* Configure shared memory and virgin_bits. This is called at startup. */
 
@@ -2424,12 +2477,12 @@ static void create_target_process(char** argv) {
     pidfile = alloc_printf("childpid_%s.txt", fuzzer_id);
 	if (persist_dr_cache) {
 		cmd = alloc_printf(
-			"%s\\drrun.exe -pidfile %s -no_follow_children -persist -persist_dir \"%s\\drcache\" -c winafl.dll %s -fuzzer_id %s -drpersist -- %s",
-			dynamorio_dir, pidfile, out_dir, client_params, fuzzer_id, target_cmd);
+			"%s\\drrun.exe -pidfile %s -no_follow_children -persist -persist_dir \"%s\\drcache\" -c %s %s -fuzzer_id %s -drpersist -- %s",
+			dynamorio_dir, pidfile, out_dir, winafl_dll_path, client_params, fuzzer_id, target_cmd);
 	} else {
 		cmd = alloc_printf(
-			"%s\\drrun.exe -pidfile %s -no_follow_children -c winafl.dll %s -fuzzer_id %s -- %s",
-			dynamorio_dir, pidfile, client_params, fuzzer_id, target_cmd);
+			"%s\\drrun.exe -pidfile %s -no_follow_children -c %s %s -fuzzer_id %s -- %s",
+			dynamorio_dir, pidfile, winafl_dll_path, client_params, fuzzer_id, target_cmd);
 	}
   }
   if(mem_limit || cpu_aff) {
@@ -2683,6 +2736,10 @@ typedef int (APIENTRY* dll_init)();
 typedef u8 (APIENTRY* dll_run_target)(char**, u32, char*, u32);
 typedef void (APIENTRY *dll_write_to_testcase)(char*, s32, const void*, u32);
 typedef u8 (APIENTRY* dll_mutate_testcase)(char**, u8*, u32, u8 (*)(char **, u8*, u32));
+typedef u8 (APIENTRY* dll_trim_testcase)(u32*, u32, u8*, u8*, void (*)(void*, u32), u8 (*)(char**, u32), char**, u32);
+
+// Parameters: argv, in_buf, buffer_length, mutation_iterations, common_fuzz_stuff
+typedef u8 (APIENTRY* dll_mutate_testcase_with_energy)(char**, u8*, u32, u32, u8 (*)(char **, u8*, u32));
 
 // custom server functions
 dll_run dll_run_ptr = NULL;
@@ -2690,6 +2747,8 @@ dll_init dll_init_ptr = NULL;
 dll_run_target dll_run_target_ptr = NULL;
 dll_write_to_testcase dll_write_to_testcase_ptr = NULL;
 dll_mutate_testcase dll_mutate_testcase_ptr = NULL;
+dll_trim_testcase dll_trim_testcase_ptr = NULL;
+dll_mutate_testcase_with_energy dll_mutate_testcase_with_energy_ptr = NULL;
 
 char *get_test_case(long *fsize)
 {
@@ -2850,6 +2909,17 @@ static void write_to_testcase(void* mem, u32 len) {
   if (dll_write_to_testcase_ptr) {
       dll_write_to_testcase_ptr(out_file, out_fd, mem, len);
       return;
+  } else if (use_sample_shared_memory) {        
+      //this writes fuzzed data to shared memory, so that it is available to harnes program.
+      uint32_t* size_ptr = (uint32_t*)shm_sample;
+      unsigned char* data_ptr = shm_sample + 4;
+     
+      if (len > MAX_SAMPLE_SIZE) len = MAX_SAMPLE_SIZE;
+     
+      *size_ptr = len;
+      memcpy(data_ptr, mem, len);
+
+      return;
   }
 
   s32 fd = out_fd;
@@ -2908,7 +2978,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
   static u8 first_trace[MAP_SIZE];
 
-  u8  fault = 0, new_bits = 0, var_detected = 0,
+  u8  fault = 0, new_bits = 0, var_detected = 0, hnb = 0,
       first_run = (q->exec_cksum == 0);
 
   u64 start_us, stop_us;
@@ -2933,7 +3003,13 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   /* Make sure the forkserver is up before we do anything, and let's not
      count its spin-up time toward binary calibration. */
 
-  if (q->exec_cksum) memcpy(first_trace, trace_bits, MAP_SIZE);
+  if (q->exec_cksum) {
+
+    memcpy(first_trace, trace_bits, MAP_SIZE);
+    hnb = has_new_bits(virgin_bits);
+    if (hnb > new_bits) new_bits = hnb;
+
+  }
 
   start_us = get_cur_time_us();
 
@@ -2961,7 +3037,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
     if (q->exec_cksum != cksum) {
 
-      u8 hnb = has_new_bits(virgin_bits);
+      hnb = has_new_bits(virgin_bits);
       if (hnb > new_bits) new_bits = hnb;
 
       if (q->exec_cksum) {
@@ -4082,7 +4158,7 @@ static void maybe_delete_out_dir(void) {
            "    session, put '-' as the input directory in the command line ('-i -') and\n"
            "    try again.\n", OUTPUT_GRACE);
 
-       FATAL("At-risk data found in in '%s'", out_dir);
+       FATAL("At-risk data found in '%s'", out_dir);
 
     }
 
@@ -4118,10 +4194,13 @@ static void maybe_delete_out_dir(void) {
 
   /* Okay, let's get the ball rolling! First, we need to get rid of the entries
      in <out_dir>/.synced/.../id:*, if any are present. */
+  if (!in_place_resume) {
 
-  fn = alloc_printf("%s\\.synced", out_dir);
-  if (delete_files(fn, NULL)) goto dir_cleanup_failed;
-  ck_free(fn);
+    fn = alloc_printf("%s\\.synced", out_dir);
+    if (delete_files(fn, NULL)) goto dir_cleanup_failed;
+    ck_free(fn);
+
+  }
 
   /* Next, we need to clean up <out_dir>/queue/.state/ subdirectories: */
 
@@ -4917,6 +4996,18 @@ static u8 trim_case(char** argv, struct queue_entry* q, u8* in_buf) {
 
   if (q->len < 5) return 0;
 
+  if (dll_trim_testcase_ptr) {
+    // Call the custom trimming function.
+    // The trimmed data will be set in in_buf and its length in q->len.
+    // The implementation can test for changes in the trace after calling run_target
+    // by calculating the hash for trace_bits and comparing it to q->exec_cksum.
+    // Checksum function is declared in hash.h.
+    // The return value will determine if the trimmed data will be written to a file.
+    needs_write = dll_trim_testcase_ptr(&q->len, q->exec_cksum,
+      in_buf, trace_bits, write_to_testcase, run_target, argv, exec_tmout);
+    goto write_trimmed;
+  }
+
   stage_name = tmp;
   bytes_trim_in += q->len;
 
@@ -4994,7 +5085,7 @@ static u8 trim_case(char** argv, struct queue_entry* q, u8* in_buf) {
 
   /* If we have made changes to in_buf, we also need to update the on-disk
      version of the test case. */
-
+write_trimmed:
   if (needs_write) {
 
     s32 fd;
@@ -5247,7 +5338,6 @@ u32 fuzz = q->n_fuzz;
   return perf_score;
 
 }
-
 
 
 /* Helper function to see if a particular change (xor_val = old ^ new) could
@@ -5576,7 +5666,11 @@ static u8 normal_fuzz_one(char** argv) {
    * CUSTOM MUTATOR *
    *****************/
 
-  if (dll_mutate_testcase_ptr)
+  // Prefer a custom mutator that accepts the performance score as an energy value.
+  if (dll_mutate_testcase_with_energy_ptr)
+    if (dll_mutate_testcase_with_energy_ptr(argv, in_buf, len, perf_score, common_fuzz_stuff))
+      goto abandon_entry;
+  else if (dll_mutate_testcase_ptr)
     if (dll_mutate_testcase_ptr(argv, in_buf, len, common_fuzz_stuff))
       goto abandon_entry;
 
@@ -8751,7 +8845,7 @@ static u8 pilot_fuzzing(char** argv) {
                                                        memcpy(out_buf + insert_at, extras[use_extra].data, extra_len);
 
                                                        }
-                                                       stage_cycles_puppet_v2[swarm_now][STAGE_OverWriteExtra] += 1;
+                                                       core_operator_cycles_puppet_v2[STAGE_OverWriteExtra] += 1;
 
                                                        break;
 
@@ -8804,7 +8898,7 @@ static u8 pilot_fuzzing(char** argv) {
                                                        ck_free(out_buf);
                                                        out_buf   = new_buf;
                                                        temp_len += extra_len;
-                                                       stage_cycles_puppet_v2[swarm_now][STAGE_InsertExtra] += 1;
+                                                       core_operator_cycles_puppet_v2[STAGE_InsertExtra] += 1;
                                                        break;
 
                                                  }
@@ -11103,7 +11197,7 @@ static void sync_fuzzers(char** argv) {
         write_to_testcase(mem, st.st_size);
 
         fault = run_target(argv, exec_tmout);
-		//ACTF("recieved FAULT_CRASH2");
+    		//ACTF("recieved FAULT_CRASH2");
         if (stop_soon) return;
 
         syncing_party = sd.cFileName;
@@ -11246,27 +11340,33 @@ static void usage(u8* argv0) {
        "  -t msec       - timeout for each run\n\n"
 
        "Instrumentation type:\n\n"
-        "  -D dir        - directory with DynamoRIO binaries (drrun, drconfig)\n"
-        "  -Y            - enable the static instrumentation mode\n\n"
+        "  -D dir       - directory with DynamoRIO binaries (drrun, drconfig)\n"
+        "  -w winafl    - Path to winafl.dll\n"
+        "  -P           - use Intel PT tracing mode\n"
+        "  -Y           - enable the static instrumentation mode\n\n"
 
        "Execution control settings:\n\n"
 
        "  -F schedule   - power schedules recompute a seed's performance score.\n"
        "                  <fast (default), coe, explore, lin, quad, or exploit>\n"
-	   "  -L time	- Time to enter pacemaker fuzzing mode. \n"
+	     "  -L time	      - Time to enter pacemaker fuzzing mode. \n"
        "  -f file       - location read by the fuzzed program (stdin)\n"
+       "  -m limit      - memory limit for the target process\n"
+       "  -p            - persist DynamoRIO cache across target process restarts\n"
        "  -c cpu        - the CPU to run the fuzzed program\n\n"
  
        "Fuzzing behavior settings:\n\n"
 
        "  -d            - quick & dirty mode (skips deterministic steps)\n"
+       "  -n            - fuzz without instrumentation (dumb mode)\n"
        "  -x dir        - optional fuzzer dictionary (see README)\n\n"
 
        "Other stuff:\n\n"
 
        "  -I msec       - timeout for process initialization and first run\n"
        "  -T text       - text banner to show on the screen\n"
-       "  -M \\ -S id    - distributed mode (see parallel_fuzzing.txt)\n"
+       "  -M \\ -S id   - distributed mode (see parallel_fuzzing.txt)\n"
+       "  -C            - crash exploration mode (the peruvian rabbit thing)\n"
        "  -l path       - a path to user-defined DLL for custom test cases processing\n\n"
 
        "For additional tips, please consult %s\\README.\n\n",
@@ -11348,7 +11448,10 @@ static void setup_dirs_fds(void) {
   if (sync_id) {
 
     tmp = alloc_printf("%s\\.synced\\", out_dir);
-    if (mkdir(tmp)) PFATAL("Unable to create '%s'", tmp);
+        
+    if (mkdir(tmp) && (!in_place_resume || errno != EEXIST)) 
+      PFATAL("Unable to create '%s'", tmp);
+
     ck_free(tmp);
 
   }
@@ -11403,6 +11506,11 @@ static void setup_dirs_fds(void) {
 
 static void setup_stdio_file(void) {
 
+  if (use_sample_shared_memory) {
+    // if using shared memory we dont need to set any file.so we just return.
+    return;
+  }
+  
   u8* fn = alloc_printf("%s\\.cur_input", out_dir);
 
   unlink(fn); /* Ignore errors */
@@ -11693,7 +11801,12 @@ static void detect_file_args(char** argv) {
       /* If we don't have a file name chosen yet, use a safe default. */
 
       if (!out_file)
+      if (!use_sample_shared_memory) {
         out_file = alloc_printf("%s\\.cur_input", out_dir);
+      } else {
+			  //this sets output file as shared memory name which is used by harness program.
+			  out_file = sample_shm_str;
+		  }
 
       /* Be sure that we're always using fully-qualified paths. */
 
@@ -11903,6 +12016,14 @@ void load_custom_library(const char *libname)
   dll_mutate_testcase_ptr = (dll_mutate_testcase)GetProcAddress(hLib, "dll_mutate_testcase");
   SAYF("dll_mutate_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
 
+  // Get pointer to user-defined trim_testcase function using GetProcAddress:
+  dll_trim_testcase_ptr = (dll_trim_testcase)GetProcAddress(hLib, "dll_trim_testcase");
+  SAYF("dll_trim_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined dll_mutate_testcase_with_energy_ptr function using GetProcAddress:
+  dll_mutate_testcase_with_energy_ptr = (dll_mutate_testcase_with_energy)GetProcAddress(hLib, "dll_mutate_testcase_with_energy");
+  SAYF("dll_mutate_testcase_with_energy %s defined.\n", dll_mutate_testcase_with_energy_ptr ? "is" : "isn't");
+
   SAYF("Sucessfully loaded and initalized\n");
 }
 
@@ -11929,7 +12050,7 @@ int main(int argc, char** argv) {
   SAYF("AFLFast powerschedulers from: https://github.com/mboehme/aflfast \n");
   SAYF("MOpt+AFL PowerScheduler winafl port by hardik05@gmail.com\n");
 
-  doc_path = "docs";
+  doc_path = "afl_docs";
 
   optind = 1;
 
@@ -11937,10 +12058,18 @@ int main(int argc, char** argv) {
   out_dir = NULL;
   dynamorio_dir = NULL;
   client_params = NULL;
+  winafl_dll_path = NULL;
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t::V:I:T:L:F:dYnCB:S:M:x:QD:b:l:pPc:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:V:I:T:L:F:sdYnCB:S:M:x:QD:b:l:pPc:w:")) > 0)
 
     switch (opt) {
+      case 's':
+        
+        if (use_sample_shared_memory) FATAL("Multiple -s options not supported");
+        use_sample_shared_memory = TRUE;
+        ACTF("using shared memory mode...");
+        break;
+
       case 'i':
 
         if (in_dir) FATAL("Multiple -i options not supported");
@@ -11954,6 +12083,12 @@ int main(int argc, char** argv) {
 
         if (out_dir) FATAL("Multiple -o options not supported");
         out_dir = optarg;
+        break;
+
+      case 'w': /* winafl.dll path */
+
+        if (winafl_dll_path) FATAL("Multiple -w options not supported");
+        winafl_dll_path = optarg;
         break;
 
       case 'D': /* dynamorio dir */
@@ -12145,155 +12280,162 @@ int main(int argc, char** argv) {
 		  break;
 
       case 'c':
+
+        if (getenv("AFL_NO_AFFINITY")) FATAL("-c and AFL_NO_AFFINITY are mutually exclusive.");
+      
         if (cpu_aff) {
           FATAL("Multiple -c options not supported");
-        }
-        else {
+        } else {
           int cpunum = 0;
 
-          if (sscanf(optarg, "%d", &cpunum) < 1) FATAL("Bad syntax used for -c");
+        if (sscanf(optarg, "%d", &cpunum) < 1 ||
+            cpunum < 0) FATAL("Bad syntax used for -c");
+
+        if (cpunum >= 64)
+            FATAL("Uh-oh, winafl doesn't support more than 64 cores at the moment\n");
 
           cpu_aff = 1ULL << cpunum;
         }
 
         break;
-	case 'V':
-		most_time_key = 1;
-		if (sscanf(optarg, "%llu", &most_time_puppet) < 1 ||optarg[0] == '-') 
-			FATAL("Bad syntax used for -V");
-		break;	
+	    case 'V':
+		    most_time_key = 1;
+		    if (sscanf(optarg, "%llu", &most_time_puppet) < 1 ||optarg[0] == '-') 
+			    FATAL("Bad syntax used for -V");
+		    
+        break;	
 
-	case 'F': /* Power schedule */
+	    case 'F': /* Power schedule */
 	
-		if (!stricmp(optarg, "fast")) {
-			schedule = FAST;
-		}
-		else if (!stricmp(optarg, "coe")) {
-			schedule = COE;
-		}
-		else if (!stricmp(optarg, "exploit")) {
-			schedule = EXPLOIT;
-		}
-		else if (!stricmp(optarg, "lin")) {
-			schedule = LIN;
-		}
-		else if (!stricmp(optarg, "quad")) {
-			schedule = QUAD;
-		}
-		else if (!stricmp(optarg, "explore")) {
-			schedule = EXPLORE;
-		}
-		break;
+		    if (!stricmp(optarg, "fast")) {
+			    schedule = FAST;
+		    }
+	    	else if (!stricmp(optarg, "coe")) {
+			    schedule = COE;
+		    }
+		    else if (!stricmp(optarg, "exploit")) {
+			    schedule = EXPLOIT;
+		    }
+		    else if (!stricmp(optarg, "lin")) {
+			    schedule = LIN;
+		    }
+		    else if (!stricmp(optarg, "quad")) {
+			    schedule = QUAD;
+		    }
+		    else if (!stricmp(optarg, "explore")) {
+			    schedule = EXPLORE;
+		    }
+		    
+        break;
 		
-	case 'L':  /* MOpt mode */
+	    case 'L':  /* MOpt mode */
 
-            //if (limit_time_sig)  FATAL("Multiple -L options not supported");
-            limit_time_sig = 1;
+        //if (limit_time_sig)  FATAL("Multiple -L options not supported");
+        limit_time_sig = 1;
 
-			if (sscanf(optarg, "%llu", &limit_time_puppet) < 1 || optarg[0] == '-') {
-				FATAL("Bad syntax used for -L");
-			}
+		    if (sscanf(optarg, "%llu", &limit_time_puppet) < 1 || optarg[0] == '-') {
+			    FATAL("Bad syntax used for -L");
+		    }
 
-			u64 limit_time_puppet2 = limit_time_puppet * 60 * 1000;
+		    u64 limit_time_puppet2 = limit_time_puppet * 60 * 1000;
 	
-			if (limit_time_puppet2 < limit_time_puppet ) {
-				FATAL("limit_time overflow");
-			}
+		    if (limit_time_puppet2 < limit_time_puppet ) {
+			    FATAL("limit_time overflow");
+		    }
 	
-			limit_time_puppet = limit_time_puppet2;
+		    limit_time_puppet = limit_time_puppet2;
 
-			SAYF("limit_time_puppet %llu\n",limit_time_puppet);
+    		SAYF("limit_time_puppet %llu\n",limit_time_puppet);
 
-			if (limit_time_puppet == 0 ){
-			    key_puppet = 1;
-			}
-	      break;
+		    if (limit_time_puppet == 0 ){
+		        key_puppet = 1;
+		    }
+	      
+        break;
 
-      default:
+  default:
 
-        usage(argv[0]);
+    usage(argv[0]);
 
-    }
+  }
 
   if (!in_dir || !out_dir || !timeout_given || (!drioless && !dynamorio_dir && !use_intelpt)) usage(argv[0]);
+                
+  if (!winafl_dll_path) {
+    winafl_dll_path = "winafl.dll";
+  }
 
-  {                //initialize swarms
-	  int i;
-	  int tmp_swarm = 0;
-	  swarm_now = 0;
+  //initialize swarms
+	int i;
+	int tmp_swarm = 0;
+	swarm_now = 0;
 
-	  if (g_now > g_max) g_now = 0;
-	  w_now = (w_init - w_end) * (g_max - g_now) / (g_max)+w_end;
+	if (g_now > g_max) g_now = 0;
+	w_now = (w_init - w_end) * (g_max - g_now) / (g_max)+w_end;
 
-	  for (tmp_swarm = 0; tmp_swarm < swarm_num; tmp_swarm++)
+	for (tmp_swarm = 0; tmp_swarm < swarm_num; tmp_swarm++)
+	{
+		double total_puppet_temp = 0.0;
+		swarm_fitness[tmp_swarm] = 0.0;
+
+	  for (i = 0; i < operator_num; i++)
 	  {
-		  double total_puppet_temp = 0.0;
-		  swarm_fitness[tmp_swarm] = 0.0;
+		  stage_finds_puppet[tmp_swarm][i] = 0;
+		  probability_now[tmp_swarm][i] = 0.0;
+		  x_now[tmp_swarm][i] = ((double)(rand() % 7000) * 0.0001 + 0.1);
+		  total_puppet_temp += x_now[tmp_swarm][i];
+		  v_now[tmp_swarm][i] = 0.1;
+		  L_best[tmp_swarm][i] = 0.5;
+		  G_best[i] = 0.5;
+		  eff_best[tmp_swarm][i] = 0.0;
 
-		  for (i = 0; i < operator_num; i++)
-		  {
-			  stage_finds_puppet[tmp_swarm][i] = 0;
-			  probability_now[tmp_swarm][i] = 0.0;
-			  x_now[tmp_swarm][i] = ((double)(rand() % 7000) * 0.0001 + 0.1);
-			  total_puppet_temp += x_now[tmp_swarm][i];
-			  v_now[tmp_swarm][i] = 0.1;
-			  L_best[tmp_swarm][i] = 0.5;
-			  G_best[i] = 0.5;
-			  eff_best[tmp_swarm][i] = 0.0;
-
-		  }
+	  }
 
 
-		  for (i = 0; i < operator_num; i++) {
-			  stage_cycles_puppet_v2[tmp_swarm][i] = stage_cycles_puppet[tmp_swarm][i];
-			  stage_finds_puppet_v2[tmp_swarm][i] = stage_finds_puppet[tmp_swarm][i];
-			  x_now[tmp_swarm][i] = x_now[tmp_swarm][i] / total_puppet_temp;
-		  }
+	  for (i = 0; i < operator_num; i++) {
+		  stage_cycles_puppet_v2[tmp_swarm][i] = stage_cycles_puppet[tmp_swarm][i];
+		  stage_finds_puppet_v2[tmp_swarm][i] = stage_finds_puppet[tmp_swarm][i];
+		  x_now[tmp_swarm][i] = x_now[tmp_swarm][i] / total_puppet_temp;
+		}
 
-		  double x_temp = 0.0;
+		double x_temp = 0.0;
 
-		  for (i = 0; i < operator_num; i++)
-		  {
-			  probability_now[tmp_swarm][i] = 0.0;
-			  v_now[tmp_swarm][i] = w_now * v_now[tmp_swarm][i] + RAND_C * (L_best[tmp_swarm][i] - x_now[tmp_swarm][i]) + RAND_C * (G_best[i] - x_now[tmp_swarm][i]);
+		for (i = 0; i < operator_num; i++)
+		{
+		  probability_now[tmp_swarm][i] = 0.0;
+		  v_now[tmp_swarm][i] = w_now * v_now[tmp_swarm][i] + RAND_C * (L_best[tmp_swarm][i] - x_now[tmp_swarm][i]) + RAND_C * (G_best[i] - x_now[tmp_swarm][i]);
 
-			  x_now[tmp_swarm][i] += v_now[tmp_swarm][i];
+		  x_now[tmp_swarm][i] += v_now[tmp_swarm][i];
 
-			  if (x_now[tmp_swarm][i] > v_max)
-				  x_now[tmp_swarm][i] = v_max;
-			  else if (x_now[tmp_swarm][i] < v_min)
-				  x_now[tmp_swarm][i] = v_min;
+		  if (x_now[tmp_swarm][i] > v_max)
+			  x_now[tmp_swarm][i] = v_max;
+		  else if (x_now[tmp_swarm][i] < v_min)
+			  x_now[tmp_swarm][i] = v_min;
 
-			  x_temp += x_now[tmp_swarm][i];
-		  }
-
-		  for (i = 0; i < operator_num; i++)
-		  {
-			  x_now[tmp_swarm][i] = x_now[tmp_swarm][i] / x_temp;
-			  if (i != 0)
-				  probability_now[tmp_swarm][i] = probability_now[tmp_swarm][i - 1] + x_now[tmp_swarm][i];
-			  else
-				  probability_now[tmp_swarm][i] = x_now[tmp_swarm][i];
-		  }
-		  if (probability_now[tmp_swarm][operator_num - 1] < 0.99 || probability_now[tmp_swarm][operator_num - 1] > 1.01)
-			  FATAL("ERROR probability");
-
-
-
-
-
+		  x_temp += x_now[tmp_swarm][i];
 	  }
 
 	  for (i = 0; i < operator_num; i++)
 	  {
-		  core_operator_finds_puppet[i] = 0;
-		  core_operator_finds_puppet_v2[i] = 0;
-		  core_operator_cycles_puppet[i] = 0;
-		  core_operator_cycles_puppet_v2[i] = 0;
-		  core_operator_cycles_puppet_v3[i] = 0;
+		  x_now[tmp_swarm][i] = x_now[tmp_swarm][i] / x_temp;
+		  if (i != 0)
+			  probability_now[tmp_swarm][i] = probability_now[tmp_swarm][i - 1] + x_now[tmp_swarm][i];
+		  else
+			  probability_now[tmp_swarm][i] = x_now[tmp_swarm][i];
 	  }
+	  if (probability_now[tmp_swarm][operator_num - 1] < 0.99 || probability_now[tmp_swarm][operator_num - 1] > 1.01)
+		  FATAL("ERROR probability");
+	}
 
-  }
+	for (i = 0; i < operator_num; i++)
+	{
+	  core_operator_finds_puppet[i] = 0;
+	  core_operator_finds_puppet_v2[i] = 0;
+	  core_operator_cycles_puppet[i] = 0;
+	  core_operator_cycles_puppet_v2[i] = 0;
+	  core_operator_cycles_puppet_v3[i] = 0;
+	}
+
   setup_signal_handlers();
   check_asan_opts();
 
@@ -12364,6 +12506,11 @@ switch (schedule) {
   } else {
 	  setup_shm();
   }
+    
+  if (use_sample_shared_memory) {
+    setup_sample_shm();
+  }
+  
   init_count_class16();
   child_handle = NULL;
   pipe_handle = NULL;
