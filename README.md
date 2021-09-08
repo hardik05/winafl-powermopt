@@ -74,8 +74,8 @@ WinAFL has been successfully used to identify bugs in Windows software, such as
  * [Microsoft] CVE-2016-7212 - found by Aral Yaman of Noser Engineering AG
  * [Microsoft] CVE-2017-0073, CVE-2017-0190, CVE-2017-11816, CVE-2018-8472, CVE-2019-1311 - found by [Symeon Paraschoudis](https://twitter.com/symeonp)
  * [Microsoft] CVE-2018-8494 - found by Guy Inbar (guyio)
- * [Microsoft] CVE-2018-8464 - found by Omri Herscovici of Check Point
- * [Microsoft] CVE-2019-0576, CVE-2019-0577, CVE-2019-0579, CVE-2019-0538, CVE-2019-0580, CVE-2019-0879, CVE-2019-0889, CVE-2019-0891, CVE-2019-0899, CVE-2019-0902, CVE-2019-1243, CVE-2019-1250,	CVE-2020-0687, CVE-2020-0964, CVE-2020-0995, CVE-2020-0879, CVE-2020-0744, CVE-2020-1141, CVE-2020-1145, CVE-2020-1179, CVE-2020-1160  - found by <a href='https://twitter.com/hardik05'>Hardik Shah</a> of McAfee 
+ * [Microsoft] CVE-2018-8464 - found by Yoav Alon and Netanel Ben-Simon from Check Point Research
+ * [Microsoft] CVE-2019-0576, CVE-2019-0577, CVE-2019-0579, CVE-2019-0538, CVE-2019-0580, CVE-2019-0879, CVE-2019-0889, CVE-2019-0891, CVE-2019-0899, CVE-2019-0902, CVE-2019-1243, CVE-2019-1250,	CVE-2020-0687, CVE-2020-0964, CVE-2020-0995, CVE-2020-0879, CVE-2020-0744, CVE-2020-1141, CVE-2020-1145, CVE-2020-1179, CVE-2020-1160,CVE-2021-1665  - found by <a href='https://twitter.com/hardik05'>Hardik Shah</a> of McAfee 
  * [Kollective Kontiki 10.0.1] CVE-2018-11672 - found by Maksim Shudrak from Salesforce
  * [Mozilla] CVE-2018-5177 - found by Guy Inbar (guyio)
  * [libxml2] CVE-2018-14404 - found by Guy Inbar (guyio)
@@ -90,7 +90,7 @@ WinAFL has been successfully used to identify bugs in Windows software, such as
 
 1. If you are building with DynamoRIO support, download and build
 DynamoRIO sources or download DynamoRIO Windows binary package from
-https://github.com/DynamoRIO/dynamorio/wiki/Downloads
+https://github.com/DynamoRIO/dynamorio/releases
 
 2. If you are building with Intel PT support, pull third party dependencies by running `git submodule update --init --recursive` from the WinAFL source directory
 
@@ -109,7 +109,7 @@ source directory).
 ```
 mkdir build32
 cd build32
-cmake -G"Visual Studio 16 2019" .. -DDynamoRIO_DIR=..\path\to\DynamoRIO\cmake -DINTELPT=1
+cmake -G"Visual Studio 16 2019" -A Win32 .. -DDynamoRIO_DIR=..\path\to\DynamoRIO\cmake -DINTELPT=1
 cmake --build . --config Release
 ```
 
@@ -158,24 +158,24 @@ The following afl-fuzz options are supported:
 ```
   -i dir        - input directory with test cases
   -o dir        - output directory for fuzzer findings
+  -t msec       - timeout for each run
+  -s            - deliver sample via shared memory
   -D dir        - directory containing DynamoRIO binaries (drrun, drconfig)
-  -p            - persist DynamoRIO cache across target process restarts
-  -w winafl     - Path to winafl.dll
+  -w path       - path to winafl.dll
   -P            - use Intel PT tracing mode
   -Y            - enable the static instrumentation mode
-  -f file       - location read by the fuzzed program (stdin)
+  -f file       - location read by the fuzzed program
+  -m limit      - memory limit for the target process
+  -p            - persist DynamoRIO cache across target process restarts
   -c cpu        - the CPU to run the fuzzed program
   -d            - quick & dirty mode (skips deterministic steps)
   -n            - fuzz without instrumentation (dumb mode)
+  -x dir        - optional fuzzer dictionary
+  -I msec       - timeout for process initialization and first run
   -T text       - text banner to show on the screen
+  -M \\ -S id   - distributed mode
   -C            - crash exploration mode (the peruvian rabbit thing)
   -l path       - a path to user-defined DLL for custom test cases processing
-  -t msec       - timeout for each run
-  -I msec       - timeout for process initialization and first run
-  -f file       - location read by the fuzzed program
-  -M \\ -S id   - distributed mode
-  -x dir        - optional fuzzer dictionary
-  -m limit      - memory limit for the target process
   -F schedule   - power scheuler(this is from AFLFast) - fast (default), coe, explore, lin, quad, or exploit
   -L            - This is from mOpt-AFL, time to enter pacemaker fuzzing mode. 
 ```
@@ -227,6 +227,14 @@ modes with WinAFL:
 Before using WinAFL for the first time, you should read the documentation for
 the specific instrumentation mode you are interested in. These also contain
 usage examples.
+
+## Sample delivery via shared memory
+
+WinAFL supports delivering samples via shared memory (as opposed to via a file, which is the default). This can be enabled by giving `-s` option to `afl-fuzz.exe`. Shared memory is faster and can avoid some problems with files (e.g. unable to ovewrwrite the sample file because a target maintains a lock on it). 
+If you are using shared memory for sample delivery then you need to make sure that in your harness you specifically read data from shared memory instead of file. Check a simple harness here:
+
+https://github.com/googleprojectzero/Jackalope/blob/6d92931b2cf614699e2a023254d5ee7e20f6e34b/test.cpp#L41  
+https://github.com/googleprojectzero/Jackalope/blob/6d92931b2cf614699e2a023254d5ee7e20f6e34b/test.cpp#L111  
 
 ## Corpus minimization
 
@@ -303,7 +311,7 @@ setsockopt(s, SOL_SOCKET, SO_LINGER, (char*)&opt, sizeof(int));
 
 ## Custom mutators
 
-WinAFL supports loading a custom mutator from a third-party DLL.  You need to implement `dll_mutate_testcase` in your DLL and provide the DLL path to WinAFL via `-l <path>` argument.  WinAFL invokes the custom mutator before all the built-in mutations, and the custom mutator can skip all the built-in mutations by returning a non-zero value.  The custom mutator should invoke `common_fuzz_stuff` to run and make WinAFL aware of each new test case.  Below is an example mutator that increments every byte by one: 
+WinAFL supports loading a custom mutator from a third-party DLL.  You need to implement `dll_mutate_testcase` or `dll_mutate_testcase_with_energy` in your DLL and provide the DLL path to WinAFL via `-l <path>` argument.  WinAFL invokes the custom mutator before all the built-in mutations, and the custom mutator can skip all the built-in mutations by returning a non-zero value.  The `dll_mutate_testcase_with_energy` function is additionally provided an energy value that is equivalent to the number of iterations expected to run in the havoc stage without deterministic mutations. The custom mutator should invoke `common_fuzz_stuff` to run and make WinAFL aware of each new test case.  Below is an example mutator that increments every byte by one: 
 
 ```c
 u8 dll_mutate_testcase(char **argv, u8 *buf, u32 len, u8 (*common_fuzz_stuff)(char**, u8*, u32))
